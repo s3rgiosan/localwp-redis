@@ -1,0 +1,35 @@
+{
+  "name": "localwp-redis",
+  "productName": "Redis",
+  "version": "1.0.0",
+  "description": "Runs a per-site Redis container on demand.",
+  "main": "lib/main.js",
+  "renderer": "lib/renderer.js",
+  "icon": "icon.png",
+  "bgColor": "#FF4438",
+  "author": "Sérgio Santos <me@s3rgiosan.com>",
+  "contributors": [
+    {
+      "name": "Sérgio Santos",
+      "url": "https://s3rgiosan.dev"
+    }
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@getflywheel/local": "^6.0.0",
+    "@getflywheel/local-components": "^17.8.1",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "react": "^18.0.0",
+    "typescript": "^5.0.0"
+  },
+  "files": [
+    "lib",
+    "docker",
+    "icon.png"
+  ]
+}
