@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as os from 'os';
 import * as net from 'net';
+import * as fs from 'fs';
 
 export async function findFreePort(): Promise<number> {
 	return new Promise((resolve, reject) => {
@@ -18,6 +19,55 @@ export async function findFreePort(): Promise<number> {
 
 const execAsync = promisify(exec);
 
+/**
+ * Find the docker binary path. Tries multiple common locations, especially
+ * for homebrew installations on macOS (both Intel and ARM).
+ */
+function getDockerBinPath(): string {
+	// List of common docker binary locations on macOS
+	const candidates = [
+		'/opt/homebrew/bin/docker', // Apple Silicon (M1/M2/M3) homebrew
+		'/usr/local/bin/docker',    // Intel homebrew or Docker Desktop
+		'/usr/bin/docker',          // System docker
+	];
+
+	for (const candidate of candidates) {
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+	}
+
+	// If not found in standard locations, assume it's in PATH
+	return 'docker';
+}
+
+const DOCKER_BIN = getDockerBinPath();
+
+/**
+ * Execute a docker command with proper environment setup.
+ */
+async function execDocker(command: string): Promise<{ stdout: string; stderr: string }> {
+	const fullCommand = `${DOCKER_BIN} ${command}`;
+
+	try {
+		return await execAsync(fullCommand);
+	} catch (err: unknown) {
+		// Check if it's a "command not found" error
+		const error = err as any;
+		if (
+			error?.code === 'ENOENT' ||
+			error?.code === 127 ||
+			/not found|ENOENT/.test(error?.message ?? '') ||
+			/not found/.test(error?.stderr ?? '')
+		) {
+			const message = `Docker executable not found. Expected at: ${DOCKER_BIN}\n` +
+				'Make sure Docker or colima is installed and accessible in PATH.';
+			throw new DockerError(message, err);
+		}
+		throw err;
+	}
+}
+
 const CONTAINER_PREFIX = 'localwp-redis-';
 const IMAGE_LABEL = 'com.localwp.redisImage';
 
@@ -32,7 +82,7 @@ async function imagePlatforms(image: string): Promise<Set<string>> {
 	if (cached) return cached;
 	const platforms = new Set<string>();
 	try {
-		const { stdout } = await execAsync(`docker manifest inspect ${image}`);
+		const { stdout } = await execDocker(`manifest inspect ${image}`);
 		const parsed = JSON.parse(stdout) as {
 			manifests?: { platform?: { os?: string; architecture?: string } }[];
 		};
@@ -78,7 +128,7 @@ export function volumeNameFor(siteId: string): string {
 
 export async function isDockerAvailable(): Promise<boolean> {
 	try {
-		await execAsync('docker info');
+		await execDocker('info');
 		return true;
 	} catch {
 		return false;
@@ -88,8 +138,8 @@ export async function isDockerAvailable(): Promise<boolean> {
 export async function isContainerRunning(siteId: string): Promise<boolean> {
 	const name = containerNameFor(siteId);
 	try {
-		const { stdout } = await execAsync(
-			`docker ps --filter "name=^/${name}$" --format "{{.Names}}"`
+		const { stdout } = await execDocker(
+			`ps --filter "name=^/${name}$" --format "{{.Names}}"`
 		);
 		return stdout.trim() === name;
 	} catch {
@@ -100,7 +150,7 @@ export async function isContainerRunning(siteId: string): Promise<boolean> {
 export async function getHostPort(siteId: string): Promise<number | null> {
 	const name = containerNameFor(siteId);
 	try {
-		const { stdout } = await execAsync(`docker port ${name} 6379/tcp`);
+		const { stdout } = await execDocker(`port ${name} 6379/tcp`);
 		const line = stdout.split('\n').map((s) => s.trim()).find(Boolean);
 		if (!line) return null;
 		const port = line.split(':').pop();
@@ -125,8 +175,8 @@ export async function getDeployedVersion(siteId: string): Promise<string | null>
 
 async function inspectContainerImage(name: string): Promise<string | null> {
 	try {
-		const { stdout } = await execAsync(
-			`docker inspect --format "{{ index .Config.Labels \\"${IMAGE_LABEL}\\" }}" ${name}`
+		const { stdout } = await execDocker(
+			`inspect --format '{{ index .Config.Labels "${IMAGE_LABEL}" }}' ${name}`
 		);
 		return stdout.trim() || null;
 	} catch {
@@ -137,8 +187,8 @@ async function inspectContainerImage(name: string): Promise<string | null> {
 export async function containerExists(siteId: string): Promise<boolean> {
 	const name = containerNameFor(siteId);
 	try {
-		const { stdout } = await execAsync(
-			`docker ps -a --filter "name=^/${name}$" --format "{{.Names}}"`
+		const { stdout } = await execDocker(
+			`ps -a --filter "name=^/${name}$" --format "{{.Names}}"`
 		);
 		return stdout.trim() === name;
 	} catch {
@@ -149,7 +199,7 @@ export async function containerExists(siteId: string): Promise<boolean> {
 export async function removeContainer(siteId: string): Promise<void> {
 	const name = containerNameFor(siteId);
 	try {
-		await execAsync(`docker rm -f ${name}`);
+		await execDocker(`rm -f ${name}`);
 	} catch {
 		/* ignore — already gone */
 	}
@@ -157,7 +207,7 @@ export async function removeContainer(siteId: string): Promise<void> {
 
 export async function startContainer(siteId: string, version: string, hostPort: number): Promise<void> {
 	if (!(await isDockerAvailable())) {
-		throw new DockerError('Docker is not running. Start Docker Desktop and try again.');
+		throw new DockerError('Docker is not running. Start Docker Desktop (or colima if using it) and make sure the docker CLI is accessible.');
 	}
 
 	const name = containerNameFor(siteId);
@@ -171,7 +221,7 @@ export async function startContainer(siteId: string, version: string, hostPort: 
 	} else if (await containerExists(siteId)) {
 		const current = await inspectContainerImage(name);
 		if (current === image) {
-			await execAsync(`docker start ${name}`);
+			await execDocker(`start ${name}`);
 			return;
 		}
 		await removeContainer(siteId);
@@ -180,9 +230,9 @@ export async function startContainer(siteId: string, version: string, hostPort: 
 	const platform = await platformFor(image);
 
 	try {
-		await execAsync(
+		await execDocker(
 			[
-				'docker run -d',
+				'run -d',
 				...(platform ? [`--platform ${platform}`] : []),
 				`--name ${name}`,
 				`--label ${CONTAINER_LABEL}`,
@@ -205,7 +255,7 @@ export async function stopContainer(siteId: string): Promise<void> {
 
 export async function stopContainerByName(name: string): Promise<void> {
 	try {
-		await execAsync(`docker stop ${name}`);
+		await execDocker(`stop ${name}`);
 	} catch (err) {
 		throw new DockerError(`Failed to stop Redis container ${name}.`, err);
 	}
@@ -214,7 +264,7 @@ export async function stopContainerByName(name: string): Promise<void> {
 export async function isRedisReady(siteId: string): Promise<boolean> {
 	const name = containerNameFor(siteId);
 	try {
-		const { stdout } = await execAsync(`docker exec ${name} redis-cli ping`);
+		const { stdout } = await execDocker(`exec ${name} redis-cli ping`);
 		return stdout.trim() === 'PONG';
 	} catch {
 		return false;
@@ -232,8 +282,8 @@ export async function waitForRedisReady(siteId: string, timeoutMs = 30_000): Pro
 
 export async function listRunningContainers(): Promise<string[]> {
 	try {
-		const { stdout } = await execAsync(
-			`docker ps --filter "label=${CONTAINER_LABEL}" --format "{{.Names}}"`
+		const { stdout } = await execDocker(
+			`ps --filter "label=${CONTAINER_LABEL}" --format "{{.Names}}"`
 		);
 		return stdout.split('\n').map((n) => n.trim()).filter(Boolean);
 	} catch {
@@ -243,7 +293,7 @@ export async function listRunningContainers(): Promise<string[]> {
 
 export async function findSiteNetwork(siteId: string): Promise<string | null> {
 	try {
-		const { stdout } = await execAsync('docker network ls --format "{{.Name}}"');
+		const { stdout } = await execDocker('network ls --format "{{.Name}}"');
 		const networks = stdout.split('\n').map((n) => n.trim()).filter(Boolean);
 		const match = networks.find((n) => n.includes(siteId)) ??
 			networks.find((n) => /local(by_?flywheel)?|localwp/i.test(n));
@@ -256,7 +306,7 @@ export async function findSiteNetwork(siteId: string): Promise<string | null> {
 export async function connectToNetwork(siteId: string, network: string): Promise<void> {
 	const name = containerNameFor(siteId);
 	try {
-		await execAsync(`docker network connect ${network} ${name}`);
+		await execDocker(`network connect ${network} ${name}`);
 	} catch (err: any) {
 		const msg = String(err?.stderr ?? err?.message ?? '');
 		if (/already exists in network/i.test(msg)) return;
