@@ -1,7 +1,7 @@
 {
   "name": "localwp-redis",
   "productName": "Redis",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Runs a per-site Redis container on demand.",
   "main": "lib/main.js",
   "renderer": "lib/renderer.js",

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-14
+
+### Changed
+
+- Each Redis setting has its own row in the site's Tools tab, with switches that re-sync with the saved state after every change. The panel reads status again as soon as the site starts or stops.
+- Hints in the panel say when a change applies: on the next site start.
+
 ## [1.2.0] - 2026-10-14
 
 ### Added
@@ -60,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Per-site Redis container lifecycle tied to Local's `siteStarted` / `siteStopped` hooks.
 
-[Unreleased]: https://github.com/s3rgiosan/localwp-redis/compare/1.2.0...HEAD
+[Unreleased]: https://github.com/s3rgiosan/localwp-redis/compare/1.2.1...HEAD
+[1.2.1]: https://github.com/s3rgiosan/localwp-redis/compare/1.2.0...1.2.1
 [1.2.0]: https://github.com/s3rgiosan/localwp-redis/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/s3rgiosan/localwp-redis/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/s3rgiosan/localwp-redis/releases/tag/1.0.0
