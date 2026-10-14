@@ -1,72 +1,92 @@
 import * as React from 'react';
-// Provided by Local at runtime (not bundled).
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { TableListRow, Switch, FlySelect } = require('@getflywheel/local-components') as {
-	TableListRow: React.ComponentType<{
-		label: string;
-		children?: React.ReactNode;
-		key?: string;
-		alignMiddle?: boolean;
-	}>;
-	Switch: React.ComponentType<{
-		checked?: boolean;
-		disabled?: boolean;
-		tiny?: boolean;
-		flat?: boolean;
-		name?: string;
-		onChange?: (name: string, checked: boolean) => void;
-	}>;
-	FlySelect: React.ComponentType<{
-		value: string;
-		options: Record<string, string>;
-		disabled?: boolean;
-		onChange?: (value: string) => void;
-	}>;
-};
+import { Banner, FlySelect, Switch, TableListRow, Text } from '@getflywheel/local-components';
 
-const { useCallback, useEffect, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 type RedisConstants = { host: string; port: number };
 
 type Status = {
 	dockerAvailable: boolean;
+	dockerError: string | null;
 	containerRunning: boolean;
 	containerExists: boolean;
+	ready: boolean;
 	version: string;
 	deployedVersion: string | null;
+	versionDowngrade: boolean;
 	hostUri: string | null;
 	hostPort: number | null;
-	ready: boolean;
 	supportedVersions: readonly string[];
 	defaultVersion: string;
 	objectCacheCurrent: RedisConstants | null;
 	cacheCurrent: boolean | null;
+	siteStatus: string | null;
+	lastError: string | null;
 };
+
+type ActionResult = { ok: boolean; error?: string };
 
 const DEFAULT_STATUS: Status = {
 	dockerAvailable: true,
+	dockerError: null,
 	containerRunning: false,
 	containerExists: false,
+	ready: false,
 	version: '',
 	deployedVersion: null,
+	versionDowngrade: false,
 	hostUri: null,
 	hostPort: null,
-	ready: false,
 	supportedVersions: [],
 	defaultVersion: '',
 	objectCacheCurrent: null,
 	cacheCurrent: null,
+	siteStatus: null,
+	lastError: null,
 };
+
+const POLL_STARTING_MS = 2000;
+const POLL_IDLE_MS = 5000;
 
 type SiteProps = { id: string; name: string; [key: string]: any };
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+// Layout uses flex and gap only; colors and type come from the Text component.
+// With `labelsControl`, the row is a <label>, so its text names the switch inside it.
+function Field({
+	label,
+	children,
+	labelsControl = false,
+}: {
+	label: string;
+	children: React.ReactNode;
+	labelsControl?: boolean;
+}) {
+	const Row = labelsControl ? 'label' : 'div';
 	return (
-		<div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, color: '#5d5e5e' }}>
-			<div style={{ fontWeight: 500, fontSize: 14, lineHeight: '30px', alignSelf: 'flex-start' }}>{label}:</div>
-			<div style={{ fontSize: 14 }}>{children}</div>
-		</div>
+		<Row style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+			<Text style={{ fontWeight: 500 }}>{label}
+				<span aria-hidden="true">:</span>
+			</Text>
+			{children}
+		</Row>
 	);
+}
+
+const VISUALLY_HIDDEN: React.CSSProperties = {
+	position: 'absolute',
+	width: 1,
+	height: 1,
+	overflow: 'hidden',
+	clip: 'rect(0 0 0 0)',
+	whiteSpace: 'nowrap',
+};
+
+function Hint({ children }: { children: React.ReactNode }) {
+	return <Text size="caption">{children}</Text>;
 }
 
 function RedisPanel({ site, electron }: { site: SiteProps; electron: any }) {
@@ -74,69 +94,97 @@ function RedisPanel({ site, electron }: { site: SiteProps; electron: any }) {
 	const [enabled, setEnabled] = useState(false);
 	const [status, setStatus] = useState<Status>(DEFAULT_STATUS);
 	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [refreshError, setRefreshError] = useState<string | null>(null);
+	const requestId = useRef(0);
+	const pollMsRef = useRef(POLL_IDLE_MS);
 
-	const refresh = useCallback(async () => {
-		const [e, s] = await Promise.all([
-			ipc.invoke('redis:isEnabled', site.id) as Promise<boolean>,
-			ipc.invoke('redis:status', site.id) as Promise<Status>,
-		]);
-		setEnabled(e);
-		setStatus(s);
+	// Resolves true when the refresh was applied. Later refreshes and unmounting
+	// invalidate earlier in-flight ones.
+	const refresh = useCallback(async (): Promise<boolean> => {
+		requestId.current += 1;
+		const current = requestId.current;
+		try {
+			const [e, s] = await Promise.all([
+				ipc.invoke('redis:isEnabled', site.id) as Promise<boolean>,
+				ipc.invoke('redis:status', site.id) as Promise<Status>,
+			]);
+			if (current !== requestId.current) return false;
+			const waiting = e && !s.ready;
+			pollMsRef.current = waiting ? POLL_STARTING_MS : POLL_IDLE_MS;
+			setEnabled(e);
+			setStatus(s);
+			setRefreshError(null);
+			return true;
+		} catch (err) {
+			if (current === requestId.current) setRefreshError(errorMessage(err));
+			return false;
+		}
 	}, [site.id, ipc]);
+
+	useEffect(
+		() => () => {
+			requestId.current += 1;
+		},
+		[]
+	);
 
 	useEffect(() => {
 		refresh();
-	}, [refresh, site.status]);
+	}, [refresh]);
 
+	let siteHalted = false;
+	switch (status.siteStatus) {
+		case 'running':
+			break;
+		case null:
+		case 'halted':
+		case 'stopped':
+			siteHalted = true;
+			break;
+		default:
+			break;
+	}
+
+	// The next poll is scheduled only after the previous refresh settles.
 	useEffect(() => {
-		const siteHalted = site.status === 'halted' || site.status === 'stopped';
-		if (!enabled || siteHalted) return;
-		const id = setInterval(refresh, status.ready ? 5000 : 2000);
-		return () => clearInterval(id);
-	}, [enabled, site.status, status.ready, refresh]);
+		let cancelled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const schedule = () => {
+			timer = setTimeout(async () => {
+				await refresh();
+				if (!cancelled) schedule();
+			}, pollMsRef.current);
+		};
+		schedule();
+		return () => {
+			cancelled = true;
+			if (timer) clearTimeout(timer);
+		};
+	}, [refresh]);
 
-	const onToggle = async (_name: string, next: boolean) => {
+	const run = async (channel: string, ...args: unknown[]) => {
 		setBusy(true);
 		try {
-			await ipc.invoke('redis:setEnabled', site.id, next);
-			setEnabled(next);
-			await refresh();
-		} finally {
-			setBusy(false);
+			const result = (await ipc.invoke(channel, site.id, ...args)) as ActionResult;
+			if (result && result.ok) {
+				setError(null);
+			} else {
+				setError((result && result.error) || 'The action failed');
+			}
+		} catch (err) {
+			setError(errorMessage(err));
 		}
+		await refresh();
+		setBusy(false);
 	};
 
-	const onObjectCacheToggle = async (_name: string, next: boolean) => {
-		setBusy(true);
-		try {
-			await ipc.invoke('redis:setObjectCacheEnabled', site.id, next);
-			await refresh();
-		} finally {
-			setBusy(false);
-		}
-	};
+	const onToggle = (_name: string, next: boolean) => run('redis:setEnabled', next);
+	const onObjectCacheToggle = (_name: string, next: boolean) => run('redis:setObjectCacheEnabled', next);
+	const onCacheToggle = (_name: string, next: boolean) => run('redis:setCacheEnabled', next);
+	const onVersionChange = (next: string) => run('redis:setVersion', next);
 
-	const onCacheToggle = async (_name: string, next: boolean) => {
-		setBusy(true);
-		try {
-			await ipc.invoke('redis:setCacheEnabled', site.id, next);
-			await refresh();
-		} finally {
-			setBusy(false);
-		}
-	};
-
-	const onVersionChange = async (next: string) => {
-		setBusy(true);
-		try {
-			await ipc.invoke('redis:setVersion', site.id, next);
-			await refresh();
-		} finally {
-			setBusy(false);
-		}
-	};
-
-	const versionOptions = React.useMemo(() => {
+	const versionOptions = useMemo(() => {
 		const out: Record<string, string> = {};
 		for (const v of status.supportedVersions) {
 			out[v] = v === status.defaultVersion ? `${v} (default)` : v;
@@ -147,10 +195,9 @@ function RedisPanel({ site, electron }: { site: SiteProps; electron: any }) {
 	const versionChangePending =
 		!!status.deployedVersion && status.deployedVersion !== status.version;
 
-	const siteHalted = site.status === 'halted' || site.status === 'stopped';
-	const siteRunning = site.status === 'running';
+	const dockerMessage = status.dockerError || 'Docker not running';
 	const stateLabel = !status.dockerAvailable
-		? 'Docker not running'
+		? dockerMessage
 		: !enabled
 			? 'Disabled'
 			: siteHalted || !status.containerRunning
@@ -164,62 +211,68 @@ function RedisPanel({ site, electron }: { site: SiteProps; electron: any }) {
 		!!ocCurrent && status.hostPort !== null &&
 		(ocCurrent.host !== '127.0.0.1' || ocCurrent.port !== status.hostPort);
 
+	const cacheOn = status.cacheCurrent === true;
+	const objectCacheOn = !!ocCurrent;
+
+	const mainDisabled = busy || (!enabled && !status.dockerAvailable);
+	const cacheDisabled = busy || (cacheOn ? false : !enabled);
+	const objectCacheDisabled = busy || (objectCacheOn ? false : !enabled || !status.dockerAvailable);
+
 	return (
 		<div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, marginTop: 14 }}>
+			{(error || refreshError) && <Banner variant="error">{error || refreshError}</Banner>}
+			{status.lastError && <Banner variant="warning">{status.lastError}</Banner>}
 			<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-				<Switch tiny flat checked={enabled} disabled={busy} onChange={onToggle} />
-				{enabled && status.dockerAvailable && !status.deployedVersion && (
-					<span style={{ color: '#5d5e5e', fontSize: 14 }}>
-						{siteRunning ? 'Restart site to create the container' : 'Start site to create the container'}
-					</span>
-				)}
+				<label>
+					<span style={VISUALLY_HIDDEN}>Redis</span>
+					<Switch tiny flat checked={enabled} disabled={mainDisabled} onChange={onToggle} />
+				</label>
+				{enabled && status.dockerAvailable && siteHalted && <Hint>Starts with the site</Hint>}
 			</div>
-			<Field label="State">{stateLabel}</Field>
+			<Field label="State">
+				<Text>{stateLabel}</Text>
+			</Field>
 			<Field label="Host">
 				{enabled && status.ready && status.hostUri ? (
-					<span style={{ userSelect: 'text', cursor: 'text' }}>{status.hostUri}</span>
+					<Text style={{ userSelect: 'text', cursor: 'text' }}>{status.hostUri}</Text>
 				) : (
-					<span style={{ color: '#5d5e5e' }}>—</span>
+					<Text size="caption">—</Text>
 				)}
 			</Field>
 			<Field label="Version">
-				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+				<div role="group" aria-label="Redis version" style={{ display: 'contents' }}>
 					<FlySelect
 						value={status.version || status.defaultVersion}
 						options={versionOptions}
-						disabled={!enabled || busy || !status.supportedVersions.length}
+						disabled={!enabled || busy || !status.dockerAvailable || !status.supportedVersions.length}
 						onChange={onVersionChange}
 					/>
-					{enabled && status.dockerAvailable && versionChangePending && (
-						<span style={{ color: '#5d5e5e', fontSize: 14 }}>Restart site to apply</span>
-					)}
 				</div>
+				{enabled && status.dockerAvailable && versionChangePending && (
+					<Hint>
+						{status.versionDowngrade
+							? 'Restart site to apply. Downgrading clears Redis data.'
+							: 'Restart site to apply'}
+					</Hint>
+				)}
 			</Field>
-			<Field label="Cache">
+			<Field label="Cache" labelsControl>
+				<Switch tiny flat checked={cacheOn} disabled={cacheDisabled} onChange={onCacheToggle} />
+			</Field>
+			<Field label="Object Cache" labelsControl>
 				<Switch
 					tiny
 					flat
-					checked={status.cacheCurrent === true}
-					disabled={!enabled || busy}
-					onChange={onCacheToggle}
+					checked={objectCacheOn}
+					disabled={objectCacheDisabled}
+					onChange={onObjectCacheToggle}
 				/>
 			</Field>
-			<Field label="Object Cache">
-				<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-					<Switch
-						tiny
-						flat
-						checked={!!ocCurrent}
-						disabled={!enabled || busy || !status.ready}
-						onChange={onObjectCacheToggle}
-					/>
-					{ocMismatch && (
-						<span style={{ color: '#f5c16c', fontSize: 14 }}>
-							WP_REDIS_* in wp-config.php ({ocCurrent!.host}:{ocCurrent!.port}) doesn't match (127.0.0.1:{status.hostPort})
-						</span>
-					)}
-				</div>
-			</Field>
+			{ocMismatch && (
+				<Banner variant="warning">
+					WP_REDIS_* in wp-config.php ({ocCurrent!.host}:{ocCurrent!.port}) doesn't match (127.0.0.1:{status.hostPort})
+				</Banner>
+			)}
 		</div>
 	);
 }
@@ -229,7 +282,7 @@ export default function (context: any): void {
 	if (!hooks?.addContent) return;
 	hooks.addContent('siteInfoUtilities', (site: SiteProps) => (
 		<TableListRow alignMiddle key="redis" label="Redis">
-			<RedisPanel site={site} electron={electron} />
+			<RedisPanel key={site.id} site={site} electron={electron} />
 		</TableListRow>
 	));
 }
