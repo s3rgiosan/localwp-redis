@@ -1,7 +1,7 @@
 {
   "name": "localwp-redis",
   "productName": "Redis",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Runs a per-site Redis container on demand.",
   "main": "lib/main.js",
   "renderer": "lib/renderer.js",
@@ -15,8 +15,16 @@
     }
   ],
   "license": "MIT",
+  "homepage": "https://github.com/s3rgiosan/localwp-redis#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/s3rgiosan/localwp-redis.git"
+  },
+  "bugs": {
+    "url": "https://github.com/s3rgiosan/localwp-redis/issues"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc",
     "watch": "tsc --watch"
   },
   "devDependencies": {
@@ -29,7 +37,6 @@
   },
   "files": [
     "lib",
-    "docker",
     "icon.png"
   ]
 }
